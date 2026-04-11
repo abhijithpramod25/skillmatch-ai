@@ -1,30 +1,29 @@
 
 
-# Generate Tools & Technologies Report (DOCX)
+# Fix: AI Returns Wrong Candidate Details
 
-## What We're Building
-A professional DOCX report documenting all tools, technologies, libraries, and frameworks used in the Resume Screening System project. The report will be well-structured with sections, tables, and descriptions suitable for academic or professional submission.
+## Problem
+The edge function pastes raw base64 as text into the prompt. The AI model cannot read base64-encoded PDF/DOCX content — it sees meaningless characters and **hallucinates** the candidate's name, email, and experience.
 
-## Report Structure
+## Solution
+Update the edge function to send resume content in a way the AI can actually read:
 
-1. **Title Page** — Project name, subtitle, date
-2. **Table of Contents**
-3. **Project Overview** — Brief description of the Resume Screening System
-4. **Technology Stack** — Organized sections:
-   - Frontend (React 18, TypeScript 5, Vite 5, Tailwind CSS v3)
-   - UI Components (shadcn/ui, Radix UI, Lucide React, Recharts)
-   - State Management & Data (Zustand, TanStack React Query)
-   - Animations (Framer Motion)
-   - Backend & Cloud (Lovable Cloud/Supabase, Deno Edge Functions)
-   - AI & NLP (Google Gemini 2.5 Flash, Lovable AI Gateway)
-   - Notifications (Sonner)
-   - Dev Tools (Bun, Vitest, Playwright, ESLint)
-5. **Architecture Summary** — Brief text description of how layers connect
-6. **Summary Table** — Category | Technology | Version | Purpose
+1. **For PDF files**: Send as a proper multimodal content part using Gemini's support for inline document data (base64 + mime type), so the model can actually read the PDF.
+2. **For DOCX files**: Parse the DOCX XML on the server side to extract plain text, then include that text in the prompt.
 
-## Technical Approach
-- Use `docx` (npm) JS library to generate a styled DOCX
-- Professional fonts (Arial), heading styles, formatted tables with borders and shading
-- Output to `/mnt/documents/tools_and_technologies_report.docx`
-- QA via LibreOffice PDF conversion and visual inspection
+## Changes
+
+### File: `supabase/functions/analyze-resume/index.ts`
+
+- Accept `file_type` from the request body (already sent by the frontend)
+- **PDF path**: Structure the user message as a multimodal content array with the PDF as an `image_url` data URI (Gemini via OpenAI-compatible API supports PDF this way)
+- **DOCX path**: Decode the base64, unzip the DOCX (which is a ZIP of XML files), extract text from `word/document.xml` by stripping XML tags
+- Send the extracted/attached content to the AI instead of raw base64 text
+- Add explicit instructions in the prompt telling the AI to extract the **exact** name and email from the resume, not guess or fabricate them
+
+### No frontend changes needed
+The frontend already sends `file_type` in the request body.
+
+## Why This Fixes It
+The AI will receive actual readable content (either a properly attached PDF or extracted DOCX text), enabling it to accurately extract the real candidate name, email, and experience from the resume.
 
