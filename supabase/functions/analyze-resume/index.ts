@@ -69,24 +69,36 @@ serve(async (req) => {
 
 CRITICAL INSTRUCTIONS:
 - Extract the EXACT name, email, education, and experience as written in the resume. Do NOT fabricate or guess any details.
+- For experience_years: calculate the TOTAL years of professional work experience by looking at employment dates in the resume. If the candidate has worked from 2020 to 2024, that is 4 years. Count all jobs listed.
 - If a field is not found in the resume, use "Not found" for strings and 0 for numbers.
 - The score should reflect how well the candidate matches the job description requirements.
 
-You MUST respond with ONLY a valid JSON object using the tool call format. Do not add any extra text.`;
+You MUST respond using the tool call format. Do not add any extra text.`;
 
-    const jobContext = `Job Title: ${job_title || "Not specified"}\n\nJob Description:\n${job_description}\n\nResume file name: ${file_name}\n\nAnalyze this resume against the job description. Extract the EXACT candidate details from the resume.`;
+    const jobContext = `Job Title: ${job_title || "Not specified"}
 
-    // Build user message content - use multimodal for PDF, extracted text for DOCX
+Job Description:
+${job_description}
+
+Resume file name: ${file_name}
+
+Analyze this resume against the job description. Extract the EXACT candidate details from the resume. Pay special attention to:
+1. The candidate's FULL NAME exactly as written
+2. Their EMAIL exactly as written  
+3. Their TOTAL YEARS of work experience (calculate from employment dates)
+4. Their education details exactly as stated`;
+
+    // Build user message content
     let userContent: any;
 
     if (isPdf) {
-      // Use proper multimodal content format for PDFs
+      // Use image_url with data URI - this is the correct OpenAI-compatible format
+      // that Gemini supports for reading PDF documents
       userContent = [
         {
-          type: "file",
-          file: {
-            filename: file_name,
-            file_data: `data:application/pdf;base64,${file_base64}`,
+          type: "image_url",
+          image_url: {
+            url: `data:application/pdf;base64,${file_base64}`,
           },
         },
         {
@@ -120,7 +132,7 @@ You MUST respond with ONLY a valid JSON object using the tool call format. Do no
                   score: { type: "number", description: "Match score 0-100 based on job description fit" },
                   skills_matched: { type: "array", items: { type: "string" }, description: "Skills from the job description found in the resume" },
                   skills_missing: { type: "array", items: { type: "string" }, description: "Required skills from job description NOT found in resume" },
-                  experience_years: { type: "number", description: "Total years of relevant experience as stated in resume" },
+                  experience_years: { type: "number", description: "Total years of professional work experience calculated from employment dates in the resume. E.g. if worked 2020-2024 that is 4 years." },
                   education: { type: "string", description: "Highest education level and field as stated in resume" },
                   summary: { type: "string", description: "Brief 2-3 sentence summary of candidate profile" },
                   strengths: { type: "array", items: { type: "string" }, description: "3-5 key strengths relevant to the job" },
@@ -136,9 +148,11 @@ You MUST respond with ONLY a valid JSON object using the tool call format. Do no
       },
     ];
 
-    // First try with multimodal PDF; if 503, fall back to text-only with truncated base64
-    let response = await callAI({
-      model: "google/gemini-2.5-flash",
+    // Use gemini-2.5-pro for PDFs (better multimodal accuracy), flash for text
+    const model = isPdf ? "google/gemini-2.5-pro" : "google/gemini-2.5-flash";
+
+    const response = await callAI({
+      model,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userContent },
@@ -146,21 +160,6 @@ You MUST respond with ONLY a valid JSON object using the tool call format. Do no
       tools,
       tool_choice: { type: "function", function: { name: "analyze_resume" } },
     }, LOVABLE_API_KEY);
-
-    // If PDF multimodal still fails after retries, fall back to sending truncated base64 as text
-    if (!response.ok && isPdf && (response.status === 503 || response.status === 400)) {
-      console.log("Multimodal PDF failed, falling back to text-based prompt...");
-      const fallbackContent = `${jobContext}\n\nResume content (base64-encoded PDF, extract what you can): ${file_base64.substring(0, 80000)}`;
-      response = await callAI({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: fallbackContent },
-        ],
-        tools,
-        tool_choice: { type: "function", function: { name: "analyze_resume" } },
-      }, LOVABLE_API_KEY);
-    }
 
     if (!response.ok) {
       if (response.status === 429) {
