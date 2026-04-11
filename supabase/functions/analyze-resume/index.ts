@@ -18,13 +18,33 @@ async function extractDocxText(base64: string): Promise<string> {
     if (entry.filename === "word/document.xml" && entry.getData) {
       const writer = new TextWriter();
       const xml = await entry.getData(writer);
-      // Strip XML tags, keep text
       text = xml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
       break;
     }
   }
   await reader.close();
   return text;
+}
+
+async function callAI(body: any, apiKey: string, retries = 2): Promise<Response> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (response.status === 503 && attempt < retries) {
+      console.log(`AI gateway returned 503, retrying (${attempt + 1}/${retries})...`);
+      await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+      continue;
+    }
+    return response;
+  }
+  throw new Error("Unreachable");
 }
 
 serve(async (req) => {
@@ -56,16 +76,17 @@ You MUST respond with ONLY a valid JSON object using the tool call format. Do no
 
     const jobContext = `Job Title: ${job_title || "Not specified"}\n\nJob Description:\n${job_description}\n\nResume file name: ${file_name}\n\nAnalyze this resume against the job description. Extract the EXACT candidate details from the resume.`;
 
-    // Build user message content
+    // Build user message content - use multimodal for PDF, extracted text for DOCX
     let userContent: any;
 
     if (isPdf) {
-      // Multimodal: send PDF as inline data so the model can read it
+      // Use proper multimodal content format for PDFs
       userContent = [
         {
-          type: "image_url",
-          image_url: {
-            url: `data:application/pdf;base64,${file_base64}`,
+          type: "file",
+          file: {
+            filename: file_name,
+            file_data: `data:application/pdf;base64,${file_base64}`,
           },
         },
         {
@@ -82,53 +103,64 @@ You MUST respond with ONLY a valid JSON object using the tool call format. Do no
       userContent = `${jobContext}\n\nResume Content:\n${resumeText}`;
     }
 
-    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
-        "Content-Type": "application/json",
+    const tools = [
+      {
+        type: "function",
+        function: {
+          name: "analyze_resume",
+          description: "Return structured resume analysis results",
+          parameters: {
+            type: "object",
+            properties: {
+              candidate: {
+                type: "object",
+                properties: {
+                  name: { type: "string", description: "Candidate full name extracted EXACTLY from resume" },
+                  email: { type: "string", description: "Candidate email extracted EXACTLY from resume" },
+                  score: { type: "number", description: "Match score 0-100 based on job description fit" },
+                  skills_matched: { type: "array", items: { type: "string" }, description: "Skills from the job description found in the resume" },
+                  skills_missing: { type: "array", items: { type: "string" }, description: "Required skills from job description NOT found in resume" },
+                  experience_years: { type: "number", description: "Total years of relevant experience as stated in resume" },
+                  education: { type: "string", description: "Highest education level and field as stated in resume" },
+                  summary: { type: "string", description: "Brief 2-3 sentence summary of candidate profile" },
+                  strengths: { type: "array", items: { type: "string" }, description: "3-5 key strengths relevant to the job" },
+                  weaknesses: { type: "array", items: { type: "string" }, description: "2-4 areas where candidate may fall short" },
+                  recommendation: { type: "string", description: "One paragraph recommendation: hire/consider/pass and why" },
+                },
+                required: ["name", "email", "score", "skills_matched", "skills_missing", "experience_years", "education", "summary", "strengths", "weaknesses", "recommendation"],
+              },
+            },
+            required: ["candidate"],
+          },
+        },
       },
-      body: JSON.stringify({
+    ];
+
+    // First try with multimodal PDF; if 503, fall back to text-only with truncated base64
+    let response = await callAI({
+      model: "google/gemini-2.5-flash",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userContent },
+      ],
+      tools,
+      tool_choice: { type: "function", function: { name: "analyze_resume" } },
+    }, LOVABLE_API_KEY);
+
+    // If PDF multimodal still fails after retries, fall back to sending truncated base64 as text
+    if (!response.ok && isPdf && (response.status === 503 || response.status === 400)) {
+      console.log("Multimodal PDF failed, falling back to text-based prompt...");
+      const fallbackContent = `${jobContext}\n\nResume content (base64-encoded PDF, extract what you can): ${file_base64.substring(0, 80000)}`;
+      response = await callAI({
         model: "google/gemini-2.5-flash",
         messages: [
           { role: "system", content: systemPrompt },
-          { role: "user", content: userContent },
+          { role: "user", content: fallbackContent },
         ],
-        tools: [
-          {
-            type: "function",
-            function: {
-              name: "analyze_resume",
-              description: "Return structured resume analysis results",
-              parameters: {
-                type: "object",
-                properties: {
-                  candidate: {
-                    type: "object",
-                    properties: {
-                      name: { type: "string", description: "Candidate full name extracted EXACTLY from resume" },
-                      email: { type: "string", description: "Candidate email extracted EXACTLY from resume" },
-                      score: { type: "number", description: "Match score 0-100 based on job description fit" },
-                      skills_matched: { type: "array", items: { type: "string" }, description: "Skills from the job description found in the resume" },
-                      skills_missing: { type: "array", items: { type: "string" }, description: "Required skills from job description NOT found in resume" },
-                      experience_years: { type: "number", description: "Total years of relevant experience as stated in resume" },
-                      education: { type: "string", description: "Highest education level and field as stated in resume" },
-                      summary: { type: "string", description: "Brief 2-3 sentence summary of candidate profile" },
-                      strengths: { type: "array", items: { type: "string" }, description: "3-5 key strengths relevant to the job" },
-                      weaknesses: { type: "array", items: { type: "string" }, description: "2-4 areas where candidate may fall short" },
-                      recommendation: { type: "string", description: "One paragraph recommendation: hire/consider/pass and why" },
-                    },
-                    required: ["name", "email", "score", "skills_matched", "skills_missing", "experience_years", "education", "summary", "strengths", "weaknesses", "recommendation"],
-                  },
-                },
-                required: ["candidate"],
-              },
-            },
-          },
-        ],
+        tools,
         tool_choice: { type: "function", function: { name: "analyze_resume" } },
-      }),
-    });
+      }, LOVABLE_API_KEY);
+    }
 
     if (!response.ok) {
       if (response.status === 429) {
@@ -139,6 +171,11 @@ You MUST respond with ONLY a valid JSON object using the tool call format. Do no
       if (response.status === 402) {
         return new Response(JSON.stringify({ error: "AI credits exhausted. Please add funds." }), {
           status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      if (response.status === 503) {
+        return new Response(JSON.stringify({ error: "AI service is temporarily unavailable. Please try again in a moment." }), {
+          status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
       const t = await response.text();

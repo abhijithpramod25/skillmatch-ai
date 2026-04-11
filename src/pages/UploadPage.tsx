@@ -84,7 +84,23 @@ export default function UploadPage() {
           },
         });
 
-        if (error) throw error;
+        if (error) {
+          // Check for specific error status codes from the response
+          const errorMsg = data?.error || error?.message || "Unknown error";
+          if (errorMsg.includes("temporarily unavailable") || errorMsg.includes("503")) {
+            toast.error(`AI service temporarily unavailable. Please try again in a moment.`);
+            break; // Stop processing if AI is down
+          }
+          if (errorMsg.includes("Rate limit")) {
+            toast.error("Rate limit reached. Please wait a moment and try again.");
+            break;
+          }
+          if (errorMsg.includes("credits")) {
+            toast.error("AI credits exhausted. Please add funds in Settings.");
+            break;
+          }
+          throw new Error(errorMsg);
+        }
 
         candidates.push({
           id: crypto.randomUUID(),
@@ -95,7 +111,7 @@ export default function UploadPage() {
         setProcessedCount(i + 1);
       } catch (err) {
         console.error("Error processing resume:", err);
-        toast.error(`Failed to process ${files[i].name}`);
+        toast.error(`Failed to process ${files[i].name}: ${err instanceof Error ? err.message : "Unknown error"}`);
       }
     }
 
